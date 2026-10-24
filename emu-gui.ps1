@@ -60,19 +60,19 @@ function Test-SdkAgreement {
     $f = Join-Path $env:LOCALAPPDATA 'Huawei\Emulator26.0\.emu_config'
     if (Test-Path $f) { (Get-Content $f -Raw) -match 'HarmonyOS_SDK_Agreement:\s*agree' } else { $false }
 }
-function Run-Emu-Stream([string[]]$Args, [string]$Stdin = '') {
+function Run-Emu-Stream([string[]]$ArgList, [string]$Stdin = '') {
     $aa = [System.Collections.Generic.List[string]]::new()
-    foreach ($a in $Args) { $aa.Add('"' + ($a -replace '"','\"') + '"') }
+    foreach ($a in $ArgList) { $aa.Add('"' + ($a -replace '"','\"') + '"') }
     $stdinArg = if ($Stdin) { $Stdin } else { $null }
     return $script:emuStream.Start($emuPath, [string]::Join(' ', $aa), $stdinArg)
 }
-function Run-Emu([string[]]$Args, [switch]$Async, [string]$Stdin = '', [switch]$Quiet) {
+function Run-Emu([string[]]$ArgList, [switch]$Async, [string]$Stdin = '', [switch]$Quiet) {
     $script:seq++
     $tag = "{0:HHmmss}-{1}" -f (Get-Date), $script:seq
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $emuPath
     $aa = [System.Collections.Generic.List[string]]::new()
-    foreach ($a in $Args) { $aa.Add('"' + ($a -replace '"','\"') + '"') }
+    foreach ($a in $ArgList) { $aa.Add('"' + ($a -replace '"','\"') + '"') }
     $psi.Arguments = [string]::Join(' ', $aa)
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
@@ -82,12 +82,26 @@ function Run-Emu([string[]]$Args, [switch]$Async, [string]$Stdin = '', [switch]$
     try { $p = [System.Diagnostics.Process]::Start($psi) }
     catch { Log "[错误] 无法启动 Emulator.exe: $($_.Exception.Message)" -Color $cErr; return }
     if ($Stdin) { $p.StandardInput.Write($Stdin); $p.StandardInput.Flush() }
-    if ($Async) { Log "▶ $($Args -join ' ')   (PID $($p.Id)，不等待)" -Color $cOk; return }
+    if ($Async) {
+        Log "▶ $($ArgList -join ' ')   (PID $($p.Id)，不等待)" -Color $cOk
+        # 失败检测: 引擎启动失败会立即退出, 用 Exited 事件捕获并报错
+        $proc = $p
+        $cmdline = $ArgList -join ' '
+        $proc.EnableRaisingEvents = $true
+        Register-ObjectEvent -InputObject $proc -EventName Exited -Action {
+            try {
+                if ($proc.ExitCode -ne 0) {
+                    Log "▶ $cmdline  已退出, exit=$($proc.ExitCode) (启动可能失败)" -Color $cErr
+                }
+            } catch { }
+        } | Out-Null
+        return
+    }
     $so = $p.StandardOutput.ReadToEndAsync()
     $se = $p.StandardError.ReadToEndAsync()
     $p.WaitForExit()
     $txt = ($so.Result) + ($se.Result)
-    Log "▶ $($Args -join ' ')"
+    Log "▶ $($ArgList -join ' ')"
     if ($txt.Trim()) {
         if ($Quiet -and ($txt -split "`r?`n").Count -gt 40) {
             $last = $txt -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 6
@@ -255,6 +269,9 @@ $bRefresh = New-Btn '🔄 刷新' { Refresh-Instances } -w 88
 $bStart   = New-Btn '▶ 启动'  { Start-Inst } -Primary -w 88
 $bStop    = New-Btn '⏹ 停止'  { if (Inst) { Run-Emu @('-stop', (Inst)) } } -w 88
 $bDel     = New-Btn '🗑 删除'  { if (Inst) { if ($chkForce.Checked) { Run-Emu @('-delete', (Inst), '-force') } else { Run-Emu @('-delete', (Inst)) } } } -w 88
+$cboBoot  = New-Cbo ([string[]]@('冷启动','快照启动','重置启动')) 90
+$cboBoot.SelectedIndex = 0
+Add-Tip $cboBoot '启动方式: 冷启动=带数据完整启动; 快照启动=热启动(需实例先开 HotBoot 且完整启动关闭过一次); 重置启动=清数据后启动'
 $chkNoWin = New-Object System.Windows.Forms.CheckBox
 $chkNoWin.Text = '无窗'; $chkNoWin.AutoSize = $true; $chkNoWin.Font = $fBody
 $chkNoWin.Margin = New-Object System.Windows.Forms.Padding(6, 6, 0, 0)
@@ -262,7 +279,7 @@ $chkForce = New-Object System.Windows.Forms.CheckBox
 $chkForce.Text = '强制删除'; $chkForce.AutoSize = $true; $chkForce.Font = $fBody
 $chkForce.Margin = New-Object System.Windows.Forms.Padding(10, 6, 0, 0)
 $f1.Controls.Add($bRefresh); $f1.Controls.Add($bStart); $f1.Controls.Add($bStop); $f1.Controls.Add($bDel)
-$f1.Controls.Add($chkNoWin); $f1.Controls.Add($chkForce)
+$f1.Controls.Add($cboBoot); $f1.Controls.Add($chkNoWin); $f1.Controls.Add($chkForce)
 $ilay.Controls.Add($f1, 0, 1)
 Align-Flow $f1
 
@@ -305,6 +322,12 @@ $f4.Controls.Add($txtMem)
 $f4.Controls.Add((New-Lbl '存储:'))
 $txtSto = New-Txt '6' 44
 $f4.Controls.Add($txtSto)
+$chkHot = New-Object System.Windows.Forms.CheckBox
+$chkHot.Text = '热启动(HotBoot)'; $chkHot.AutoSize = $true; $chkHot.Font = $fBody
+$chkHot.Checked = $true
+$chkHot.Margin = New-Object System.Windows.Forms.Padding(10, 6, 0, 0)
+Add-Tip $chkHot '勾选后创建带 Quick Boot 的实例: 完整启动+正常关闭一次后, 可用「快照启动」秒开'
+$f4.Controls.Add($chkHot)
 $bCreate = New-Btn '＋ 创建实例' {
     # ---- 创建校验(防乱填) ----
     $n = $txtNew.Text.Trim()
@@ -323,14 +346,19 @@ $bCreate = New-Btn '＋ 创建实例' {
     if ($sto) { $a += @('-storage', $sto) }
     $prof = [string]$cboProf.SelectedItem
     if ($prof -and $prof -ne '默认(按设备)') { $a += @('-screenProfile', $prof) }
+    if ($chkHot.Checked) { $a += @('-hotBoot', 'true') }
     # ---- 确认框 ----
     $msg = "确认创建实例?`n名称: $n`n设备: $($cboDev.SelectedItem)`n版本: $($cboVer.Text)`n内存: ${mem}GB  存储: ${sto}GB"
     if ($prof -and $prof -ne '默认(按设备)') { $msg += "`n机型: $prof" }
+    if ($chkHot.Checked) { $msg += "`n热启动(HotBoot): 开" }
     if ([System.Windows.Forms.MessageBox]::Show($form, $msg, '创建实例', 'YesNo', 'Question') -ne 'Yes') {
         Log '已取消创建' -Color $cMuted; return
     }
     Run-Emu $a
     Refresh-Instances
+    if (-not $list.Items.Contains($n)) {
+        Log "创建失败: 实例 $n 未出现(引擎可能不支持所选机型/参数, 见上方输出)" -Color $cErr
+    }
 } -Primary
 $f4.Controls.Add($bCreate)
 $ilay.Controls.Add($f4, 0, 4)
@@ -371,6 +399,11 @@ function Start-Inst {
     if (-not $n) { Log '先填实例名（或从列表选择）' -Color $cErr; return }
     $a = @('-start', $n)
     if ($chkNoWin.Checked) { $a += '-noWindow' }
+    $bm = @('coldboot','snapshot','reset')[$cboBoot.SelectedIndex]
+    $a += @('-bootMode', $bm)
+    if ($bm -eq 'snapshot' -and -not $chkHot.Checked) {
+        Log '注意: 快照启动需实例带 HotBoot 创建(勾选热启动)且完整启动+关闭过一次' -Color $cMuted
+    }
     Run-Emu $a -Async
 }
 function Refresh-Instances {
