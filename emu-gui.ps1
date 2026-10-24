@@ -279,7 +279,7 @@ $chkForce = New-Object System.Windows.Forms.CheckBox
 $chkForce.Text = '强制删除'; $chkForce.AutoSize = $true; $chkForce.Font = $fBody
 $chkForce.Margin = New-Object System.Windows.Forms.Padding(10, 6, 0, 0)
 $f1.Controls.Add($bRefresh); $f1.Controls.Add($bStart); $f1.Controls.Add($bStop); $f1.Controls.Add($bDel)
-$f1.Controls.Add($cboBoot); $f1.Controls.Add($chkNoWin); $f1.Controls.Add($chkForce)
+$f1.Controls.Add($cboBoot)
 $ilay.Controls.Add($f1, 0, 1)
 Align-Flow $f1
 
@@ -289,6 +289,7 @@ $txtName = New-Txt '' 150
 $f2.Controls.Add($txtName)
 $bLic = New-Btn '📜 接受协议' { Run-Emu @('-license', 'accept') }
 $f2.Controls.Add($bLic)
+$f2.Controls.Add($chkNoWin); $f2.Controls.Add($chkForce)
 $ilay.Controls.Add($f2, 0, 2)
 Align-Flow $f2
 
@@ -314,7 +315,7 @@ Align-Flow $f3
 
 $f4 = New-Flow
 $f4.Controls.Add((New-Lbl '机型:'))
-$cboProf = New-Cbo ([string[]]@('默认(按设备)')) 150
+$cboProf = New-Cbo ([string[]]@('默认(按设备)')) 110
 $f4.Controls.Add($cboProf)
 $f4.Controls.Add((New-Lbl '内存:'))
 $txtMem = New-Txt '4' 44
@@ -323,7 +324,7 @@ $f4.Controls.Add((New-Lbl '存储:'))
 $txtSto = New-Txt '6' 44
 $f4.Controls.Add($txtSto)
 $chkHot = New-Object System.Windows.Forms.CheckBox
-$chkHot.Text = '热启动(HotBoot)'; $chkHot.AutoSize = $true; $chkHot.Font = $fBody
+$chkHot.Text = '热启动'; $chkHot.AutoSize = $true; $chkHot.Font = $fBody
 $chkHot.Checked = $true
 $chkHot.Margin = New-Object System.Windows.Forms.Padding(10, 6, 0, 0)
 Add-Tip $chkHot '勾选后创建带 Quick Boot 的实例: 完整启动+正常关闭一次后, 可用「快照启动」秒开'
@@ -427,8 +428,10 @@ function Refresh-Instances {
     $parsed = $false
     try {
         $j = $txt | ConvertFrom-Json
-        if ($j -is [System.Array] -and $j.Count -gt 0) {
-            foreach ($x in $j) {
+        # 单实例时 ConvertFrom-Json 会把 [{...}] 解包成单个对象, 必须 @() 强制成数组
+        $arr = @($j)
+        if ($arr.Count -gt 0) {
+            foreach ($x in $arr) {
                 $n = if ($x.name) { $x.name } elseif ($x.instanceName) { $x.instanceName } else { "$x" }
                 [void]$list.Items.Add($n); $parsed = $true
             }
@@ -437,7 +440,8 @@ function Refresh-Instances {
     if (-not $parsed) {
         foreach ($ln in ($txt -split "`r?`n")) {
             $t = $ln.Trim()
-            if ($t -and $t -ne '[Empty]') { [void]$list.Items.Add(($t -split '\s+')[0]) }
+            # 过滤 JSON 特征行(字段名/括号), 只留真正的实例名
+            if ($t -and $t -ne '[Empty]' -and $t -notmatch '^["{}[\],]') { [void]$list.Items.Add(($t -split '\s+')[0]) }
         }
     }
     $lblCnt.Text = "共 $($list.Items.Count) 个实例"
@@ -797,4 +801,24 @@ $status.Text = if ($v) { "就绪 · $v · $agreeTxt" } else { "就绪 · $agreeT
 Log "就绪 · $($v) · $emuPath"
 Log '用法：刷新列表 → 选/填实例名 → 启动；镜像列表选中行 → 下载；实例操作用于上方实例。'
 Refresh-Instances
+# 调试: EMU_GUI_DUMP=1 时启动后 2 秒 dump 控件树实测尺寸到 TEMP, 供布局排查(文档方法论)
+if ($env:EMU_GUI_DUMP) {
+    $dumpFile = Join-Path $env:TEMP 'emu_gui_dump.txt'
+    $form.Add_Shown({
+        $t = New-Object System.Windows.Forms.Timer
+        $t.Interval = 2000
+        $t.Add_Tick({
+            $t.Stop()
+            $sb = New-Object System.Text.StringBuilder
+            function Dump-Ctrl($c, [int]$depth) {
+                $txt = if ($c -is [System.Windows.Forms.Label] -or $c -is [System.Windows.Forms.Button] -or $c -is [System.Windows.Forms.GroupBox]) { " '$($c.Text)'" } else { '' }
+                [void]$sb.AppendLine(("{0}{1} [{2}] {3} Dock={4} AutoSize={5}{6}" -f ('  ' * $depth), $c.GetType().Name, $c.Name, $c.Bounds, $c.Dock, $c.AutoSize, $txt))
+                foreach ($cc in $c.Controls) { Dump-Ctrl $cc ($depth + 1) }
+            }
+            Dump-Ctrl $form 0
+            [System.IO.File]::WriteAllText($dumpFile, $sb.ToString(), [System.Text.Encoding]::UTF8)
+        })
+        $t.Start()
+    })
+}
 [System.Windows.Forms.Application]::Run($form)
